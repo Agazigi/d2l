@@ -1,5 +1,5 @@
 import time
-
+import numpy as np
 from IPython import display
 from matplotlib_inline import backend_inline
 import matplotlib.pyplot as plt

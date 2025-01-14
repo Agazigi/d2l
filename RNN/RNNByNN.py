@@ -1,81 +1,65 @@
-import torch as th
-from torch.nn import functional as F
-import utils.Loader as ld
 import math
+import torch as th
 import torch.nn as nn
+from torch.nn import functional as F
 from SequenceModel.myutils import Accumulator, Timer, Animator
+from utils import Loader as ld
 import matplotlib.pyplot as plt
 
-batch_size, num_steps = 32, 35
-train_iter, vocab = ld.load_data_time_machine(batch_size, num_steps)
+batch_size = 32
+num_steps = 35
+train_iter, vocab = ld.load_data_time_machine(batch_size, num_steps) # 加载数据
 
-def try_gpu(i=0):
-    return th.device(f'cuda:{i}') if i >= 0 and th.cuda.is_available() else th.device('cpu')
+num_hiddens = 256
+rnn_layer = nn.RNN(len(vocab), num_hiddens)
 
-def get_params(vocab_size, num_hiddens, device):
-    """
-    初始化 RNN 的模型参数
-    """
-    num_inputs = num_outputs = vocab_size # 输入和输出都是词表的词数 28
+state = th.zeros((1, batch_size, num_hiddens))
 
-    def normal(shape):
+class RNNModel(nn.Module): # 继承父类 nn.Module
+    def __init__(self, rnn_layer, vocab_size, **kwargs):
+        super(RNNModel, self).__init__(**kwargs) # 父类 nn.Module 的初始化方法，其中的 **kwargs 是一个字典，
+                                                # 包含了父类 nn.Module 的所有参数
+        self.rnn = rnn_layer # rnn_layer 是 nn.RNN 的实例，即我们的 rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size # 隐藏单元数
+        if not self.rnn.bidirectional: # 单向 RNN
+            self.num_directions = 1 # 单向 RNN
+            self.linear = nn.Linear(self.num_hiddens, self.vocab_size)
+        else:
+            # 双向 RNN
+            self.num_directions = 2
+            self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
+    def forward(self, inputs, state):
         """
-        返回一个参数的初始化
+        向前传播
         """
-        return th.randn(size=shape, device=device) * 0.01
+        X = F.one_hot(inputs.T.long(), self.vocab_size) # 将输入转换为 one-hot 向量
+        X = X.to(th.float32)
+        Y, state = self.rnn(X, state)
+        # 全连接层首先将Y的形状改为(时间步数*批量大小, 隐藏单元数)
+        # 它的输出形状是(时间步数*批量大小, 词表大小)
+        output = self.linear(Y.reshape((-1, Y.shape[-1])))
+        return output, state
+    def begin_state(self, device, batch_size=1):
+        if not isinstance(self.rnn, nn.LSTM):
+            # 当是 GRU 时
+            return th.zeros((self.num_directions * self.rnn.num_layers,
+                             batch_size, self.num_hiddens), device=device)
+        else:
+            # LSTM 一个是记忆状态，另一个是隐藏状态
+            return (th.zeros((self.num_directions * self.rnn.num_layers,
+                             batch_size, self.num_hiddens), device=device),
+                    th.zeros((self.num_directions * self.rnn.num_layers,
+                             batch_size, self.num_hiddens), device=device))
 
-    # H_t = ReLU( X_t * W_xh + H_t-1 * W_hh + b_h)
-    W_xh = normal((num_inputs, num_hiddens))
-    W_hh = normal((num_hiddens, num_hiddens))
-    b_h = th.zeros(num_hiddens, device=device)
+device = th.device(f'cuda:{0}') if th.cuda.is_available() else th.device('cpu')
+net = RNNModel(rnn_layer, vocab_size=len(vocab))
+net.to(device)
 
-    # O_t = H_t * W_hq + b_q
-    W_hq = normal((num_hiddens, num_outputs))
-    b_q = th.zeros(num_outputs, device=device)
 
-    params = [W_xh, W_hh, b_h, W_hq, b_q]
-    for param in params:
-        param.requires_grad_(True) # 启用梯度计算
-    return params
-
-def init_rnn_state(batch_size, num_hiddens, device):
-    """
-    初始化时返回隐状态
-    """
-    return (th.zeros((batch_size, num_hiddens), device=device), )
-
-def rnn(inputs, state, params):
-    """
-    向前传播 RNN
-    """
-    W_xh, W_hh, b_h, W_hq, b_q = params # 获取参数
-    H, = state # 获取隐藏层状态
-    outputs = []
-    for X in inputs: # 遍历输入
-        H = th.tanh(th.mm(X, W_xh) + th.mm(H, W_hh) + b_h) # 计算隐藏层状态
-        Y = th.mm(H, W_hq) + b_q # 计算输出
-        outputs.append(Y) # 保存输出
-    return th.cat(outputs, dim=0), (H,) # 返回输出和隐藏层状态
-
-class RNNModelScratch: # RNN模型
-    """
-    RNN 模型
-    """
-    def __init__(self, vocab_size, num_hiddens, device, get_params, init_state, forward_fn):
-        self.vocab_size= vocab_size
-        self.num_hiddens = num_hiddens
-        self.params = get_params(vocab_size, num_hiddens, device)
-        self.init_state= init_state
-        self.forward_fn = forward_fn
-    def __call__(self, X, state):
-        X = F.one_hot(X.T, self.vocab_size).type(th.float32) # 转换为one-hot向量
-        return self.forward_fn(X, state, self.params)
-    def begin_state(self, batch_size, device): # 初始化隐藏层状态
-        return self.init_state(batch_size, self.num_hiddens, device)
-
-num_hiddens = 512
-net = RNNModelScratch(len(vocab), num_hiddens, try_gpu(), get_params, init_rnn_state, rnn)
-
+'''
+    重复的内容
+'''
 def predict_rnn(prefix, num_preds, net, vocab, device):
     """
     预测
@@ -91,15 +75,6 @@ def predict_rnn(prefix, num_preds, net, vocab, device):
         outputs.append(int(y.argmax(dim=1).reshape(1)))
     return ''.join([vocab.idx_to_token[i] for i in outputs])
 
-# ans = predict('time traveller ', 10, net, vocab, try_gpu())
-# print(ans)
-
-'''
-    问题：对于一个长度 n 的序列，计算 n 个时间步上的梯度 -> 梯度爆炸！ 梯度消失！
-    (最近读的一篇论文中也有对可能出现梯度爆炸或消失的情况进行优化。
-     论文链接：)
-    可以通过梯度裁剪
-'''
 
 def grad_clipping(net, theta):
     """
@@ -114,17 +89,6 @@ def grad_clipping(net, theta):
         for param in params:
             param.grad[:] *= theta / norm # 进行裁剪
 
-'''
-    训练
-'''
-
-'''
-    检验
-    困惑度：exp(-1/n * ( sum( log(P(x_t | X_t-1, ..., x_1)))
-          下一个词元的实际选择数的调和平均数
-          1: 最好
-          +∞: 不好
-'''
 def train_epoch_rnn(net, train_iter, loss, optimizer, device, use_random_iter):
     state = None # 初始化 state
     metric = Accumulator(2)
@@ -180,5 +144,4 @@ def train_rnn(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=Fa
     plt.show()
 
 num_epochs, lr = 500, 1
-train_rnn(net, train_iter, vocab, lr, num_epochs, try_gpu())
-
+train_rnn(net, train_iter, vocab, lr, num_epochs, device)
