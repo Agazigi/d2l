@@ -13,5 +13,5 @@ num_hiddens = 256
 GRU_Layer = nn.GRU(num_inputs, num_hiddens) # 创建 GRU 层
 net = RNNModel(GRU_Layer, vocab_size=len(vocab))
 device = th.device(f'cuda:{0}') if th.cuda.is_available() else th.device('cpu')
-net.to(device)
+net = net.to(device)
 train_rnn(net, train_iter, vocab, lr=1, num_epochs=500, device=device)
